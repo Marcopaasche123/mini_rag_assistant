@@ -112,9 +112,20 @@ def ingest_file_to_chroma(client: OpenAI, file_bytes, file_name: str):
     return len(chunks)
 
 def retrieve_context(client: OpenAI, query: str, top_k: int = 4) -> List[str]:
-    col = get_chroma_collection()  # <- SIEMPRE kb01
+    col = get_chroma_collection()
     q_emb = embed_texts(client, [query])[0]
-    res = col.query(query_embeddings=[q_emb], n_results=top_k)
+
+    # restrict retrieval to the active source if set
+    where_filter = None
+    active_src = st.session_state.get("active_source")
+    if active_src:
+        where_filter = {"source": active_src}
+
+    res = col.query(
+        query_embeddings=[q_emb],
+        n_results=top_k,
+        where=where_filter  # only pull chunks from that file
+    )
     docs = res.get("documents", [[]])[0]
     return docs
 
@@ -138,6 +149,8 @@ st.title("Mini AI Knowledge Assistant (RAG + Tool)")
 
 # 👇 Añade esta línea justo después del st.title()
 st.caption(f"Vector store: {CHROMA_DIR} | Collection: {COLLECTION_NAME}")
+st.caption(f"Active source: {st.session_state.get('active_source','(none)')}")
+
 
 
 if not OPENAI_API_KEY:
@@ -152,7 +165,18 @@ with st.sidebar:
     if st.button("Ingest file to KB") and up and OPENAI_API_KEY:
         bytes_data = up.read()
         n_chunks = ingest_file_to_chroma(client, bytes_data, up.name)
-        st.success(f"Ingested {n_chunks} chunks from {up.name}")
+        st.session_state["active_source"] = up.name
+        st.success(f"Ingested {n_chunks} chunks from {up.name} (set as active)")
+
+    # 👇 Step D: Clear KB button
+    if st.button("🔁 Clear KB"):
+        client_chroma = chromadb.PersistentClient(path=CHROMA_DIR, settings=Settings(allow_reset=True))
+        try:
+            client_chroma.delete_collection(COLLECTION_NAME)
+        except Exception:
+            pass
+        st.session_state.pop("active_source", None)
+        st.success("Cleared the vector store. Re-ingest a file.")
 
     st.divider()
     st.header("🛠️ Tool: Notes")
@@ -175,6 +199,8 @@ with st.sidebar:
             st.write(f"• #{rid} — **{title}** ({ts})")
     else:
         st.write("_No notes yet._")
+    
+    
 
 # Main chat
 st.subheader("💬 Chat with your Knowledge Base")
@@ -185,6 +211,12 @@ if st.button("Ask") and question and OPENAI_API_KEY:
     with st.spinner("Thinking..."):
         ctx = retrieve_context(client, question, top_k=top_k)
         answer = call_llm(client, question, ctx)
+
+        # Show the context (for debugging)
+        st.markdown("### Retrieved Context")
+        st.write(ctx)
+
+        # Show the final answer
         st.markdown("### Answer")
         st.write(answer)
 
